@@ -11,19 +11,26 @@ on:
         description: Magisk preinit device
         required: false
         default: 'sdb10'
+      enable-root:
+        description: Enable Root (Magisk)
+        required: true
+        type: boolean
+        default: true
       skip-release:
         description: Skip release (build only)
         required: false
         type: boolean
-        default: true
+        default: false
 
 jobs:
   build-device:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+
+    permissions:
+      contents: write
 
     env:
-      # Map your secrets to the variable names the script expects
       KEYS_AVB_BASE64: ${{ secrets.AVB_KEY }}
       KEYS_OTA_BASE64: ${{ secrets.OTA_KEY }}
       KEYS_CERT_OTA_BASE64: ${{ secrets.CERT_OTA }}
@@ -54,6 +61,14 @@ jobs:
           echo "INTERACTIVE_MODE=false" >> $GITHUB_ENV
           echo "GRAPHENEOS_UPDATE_CHANNEL=stable" >> $GITHUB_ENV
           echo "SKIP_RELEASE=${{ github.event.inputs.skip-release }}" >> $GITHUB_ENV
+          echo "ENABLE_ROOT=${{ github.event.inputs.enable-root }}" >> $GITHUB_ENV
+          
+          # Set flavor based on root selection
+          if [[ "${{ github.event.inputs.enable-root }}" == "true" ]]; then
+            echo "BUILD_FLAVOR=magisk" >> $GITHUB_ENV
+          else
+            echo "BUILD_FLAVOR=rootless" >> $GITHUB_ENV
+          fi
 
       - name: Configure Git
         run: |
@@ -62,9 +77,9 @@ jobs:
 
       - name: Create env.toml
         run: |
-          cat > env.toml << 'EOF'
+          cat > env.toml << EOF
           [device]
-          DEVICE_NAME = "mustang"
+          DEVICE_NAME = "${{ github.event.inputs.device-id }}"
           'GRAPHENEOS[UPDATE_CHANNEL]' = "stable"
 
           [avbroot]
@@ -73,20 +88,20 @@ jobs:
           [modules]
           BCR = true
           CUSTOTA = true
-          MAGISK = true
+          MAGISK = ${{ github.event.inputs.enable-root }}
           MSD = true
           OEM_UNLOCK_ON_BOOT = true
           ALTER_INSTALLER = true
           CHARGE_LIMIT = true
 
           [build]
-          FLAVOR = "magisk"
+          FLAVOR = "${{ env.BUILD_FLAVOR }}"
           INTERACTIVE_MODE = false
           CLEAN_BUILD = false
           KEEP_OUTPUT = true
 
           [magisk]
-          PREINIT_DEVICE = "sdb10"
+          PREINIT_DEVICE = "${{ github.event.inputs.magisk-preinit-device }}"
           EOF
 
           echo "env.toml created:"
@@ -104,13 +119,78 @@ jobs:
         run: |
           DEBUG=1 . src/main.sh
 
+      - name: Find built files
+        id: find-files
+        run: |
+          echo "Looking for built OTA files..."
+          
+          # List all files
+          find . -name "*.zip" -o -name "*.patched" | head -20
+          
+          # Find the patched OTA
+          OTA_FILE=$(find . -name "*.zip.patched" 2>/dev/null | head -1)
+          
+          if [[ -z "$OTA_FILE" ]]; then
+            OTA_FILE=$(find ./output -name "*.zip" 2>/dev/null | head -1)
+          fi
+          
+          if [[ -z "$OTA_FILE" ]]; then
+            OTA_FILE=$(find ./.tmp -name "*patched*.zip" 2>/dev/null | head -1)
+          fi
+          
+          echo "Found OTA: $OTA_FILE"
+          echo "ota_file=$OTA_FILE" >> $GITHUB_OUTPUT
+          
+          # Get version
+          VERSION=$(echo "$OTA_FILE" | grep -oE '[0-9]{10}' | head -1)
+          if [[ -z "$VERSION" ]]; then
+            VERSION=$(date +%Y%m%d%H)
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Create Release
+        if: github.event.inputs.skip-release != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.DEVICE_NAME }}-${{ env.VERSION }}-${{ env.BUILD_FLAVOR }}
+          name: PixeneOS ${{ env.DEVICE_NAME }} - ${{ env.VERSION }} (${{ env.BUILD_FLAVOR }})
+          body: |
+            ## PixeneOS Release
+            
+            **Device:** ${{ env.DEVICE_NAME }}
+            **Version:** ${{ env.VERSION }}
+            **Flavor:** ${{ env.BUILD_FLAVOR }}
+            **Root:** ${{ github.event.inputs.enable-root }}
+            
+            ### Included Modules
+            - BCR (Basic Call Recorder)
+            - Custota (Custom OTA)
+            - MSD (Mass Storage Device)
+            - OEMUnlockOnBoot
+            - AlterInstaller
+            - ChargeLimit
+            ${{ github.event.inputs.enable-root == 'true' && '- Magisk (Root)' || '' }}
+            
+            ### Installation
+            See the [README](https://github.com/${{ github.repository }}) for installation instructions.
+          files: |
+            ./**/*.zip.patched
+            ./**/output/*.zip
+            ./**/*ota*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pixeneos-${{ env.DEVICE_NAME }}-build
+          name: pixeneos-${{ env.DEVICE_NAME }}-${{ env.BUILD_FLAVOR }}-build
           path: |
             output/
+            .tmp/
             *.zip
             *.patched
           retention-days: 7
