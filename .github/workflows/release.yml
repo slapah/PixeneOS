@@ -65,47 +65,66 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  steps:
+      # FIX: Changed v6 to v4 (current stable version)
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+          
+      - name: Set inputs
         run: |
-          pip install tomlkit pydantic
-          sudo apt-get update
-          sudo apt-get install -y jq curl git e2fsprogs pkg-config
-
-      - name: Set environment variables
-        run: |
-          DEVICE_ID=$(echo '${{ github.event.inputs.device-id || inputs.device-id || 'mustang' }}' | xargs)
+          DEVICE_ID=$(echo '${{ github.event.inputs.device-id || inputs.device-id || 'shiba' }}' | xargs)
           echo "DEVICE_ID=$DEVICE_ID" >> $GITHUB_ENV
-          echo "DEVICE_NAME=$DEVICE_ID" >> $GITHUB_ENV
-
+          
           if [[ "${{ github.event.inputs.skip-rooted }}" != "true" ]]; then
             INPUT_PREINIT=$(echo '${{ github.event.inputs.magisk-preinit-device || inputs.magisk-preinit-device }}' | xargs)
             if [[ -n "$INPUT_PREINIT" ]]; then
-              echo "MAGISK_PREINIT_DEVICE=$INPUT_PREINIT" >> $GITHUB_ENV
+               echo "MAGISK_PREINIT_DEVICE=$INPUT_PREINIT" >> $GITHUB_ENV
             elif [[ "$DEVICE_ID" == "mustang" ]]; then
-              echo "MAGISK_PREINIT_DEVICE=sdb10" >> $GITHUB_ENV
+               echo "MAGISK_PREINIT_DEVICE=sdb10" >> $GITHUB_ENV
             else
-              echo "MAGISK_PREINIT_DEVICE=sda10" >> $GITHUB_ENV
+               echo "MAGISK_PREINIT_DEVICE=sda10" >> $GITHUB_ENV
             fi
           fi
-
-          echo "INTERACTIVE_MODE=false" >> $GITHUB_ENV
-          echo "GRAPHENEOS_UPDATE_CHANNEL=stable" >> $GITHUB_ENV
-          echo "SKIP_RELEASE=${{ github.event.inputs.skip-release }}" >> $GITHUB_ENV
-
-          if [[ "${{ github.event_name }}" == "push" ]] || [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            
+          echo "MAGISK_VERSION=$(echo '${{ github.event.inputs.magisk-version || '' }}' | xargs)" >> $GITHUB_ENV
+          echo "OTA_VERSION=$(echo '${{ github.event.inputs.ota-version || '' }}' | xargs)" >> $GITHUB_ENV
+          echo "FORCE_OTA_SERVER_UPLOAD=$(echo '${{ github.event.inputs.force-ota-server-upload || '' }}' | xargs)" >> $GITHUB_ENV
+          echo "FORCE_BUILD=$(echo '${{ github.event.inputs.force-build || '' }}' | xargs)" >> $GITHUB_ENV
+          echo "UPLOAD_TEST_OTA=$(echo '${{ github.event.inputs.upload-test-ota || '' }}' | xargs)" >> $GITHUB_ENV
+          echo "SKIP_ROOTLESS=$(echo '${{ github.event.inputs.skip-rootless || '' }}' | xargs)" >> $GITHUB_ENV
+          echo "SKIP_RELEASE=$(echo '${{ github.event.inputs.skip-release || '' }}' | xargs)" >> $GITHUB_ENV
+            
+          if [[ "${{ github.event_name }}" == "push" ]]  || [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "Running on push: Simple build without release for device $DEVICE_ID"
             echo "FORCE_BUILD=true" >> $GITHUB_ENV
             echo "SKIP_RELEASE=true" >> $GITHUB_ENV
+            echo "GITHUB_TOKEN=must-be-set-but-is-not-used" >> $GITHUB_ENV
+          else
+            echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          fi
+
+      - run: sudo apt-get install -y jq curl git
+
+      # FIX: Added this step back with a dummy email so git commits work
+      - name: Configure git
+        run: |
+          git config --global user.email "bot@github.com"
+          git config --global user.name "PiX Bot"
+
+      - name: release
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+          KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
+          CERT_OTA_BASE64: ${{ secrets.CERT_OTA_BASE64 }}
+          KEY_OTA_BASE64: ${{ secrets.KEY_OTA_BASE64 }}
+          PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
+          PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
+        run: |
+          if [[ $SKIP_RELEASE == 'true' ]]; then
+            DEBUG=1 bash -c '. rooted-ota.sh && createRootedOta && createOtaServerData'
+          else
+            DEBUG=1 bash -c '. rooted-ota.sh && createAndReleaseRootedOta'
           fi
 
       - name: Configure Git
