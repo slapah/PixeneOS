@@ -1,24 +1,6 @@
 name: Release single device
 
 on:
-  push:
-    branches:
-      - '*'
-    paths:
-      - src/**
-      - env.toml
-  pull_request:
-    types: [synchronize, opened, reopened]
-    paths:
-      - src/**
-      - env.toml
-  workflow_call:
-    inputs:
-      device-id:
-        type: string
-      magisk-preinit-device:
-        type: string
-        default: ''
   workflow_dispatch:
     inputs:
       device-id:
@@ -29,103 +11,41 @@ on:
         description: Magisk preinit device
         required: false
         default: 'sdb10'
-      skip-rootless:
-        description: Skip building rootless OTA
-        type: boolean
-        required: false
-      skip-rooted:
-        description: Skip building rooted OTA
-        type: boolean
-        required: false
-      upload-test-ota:
-        description: Upload OTA to test folder
-        required: false
-        type: boolean
-      force-build:
-        description: Force artifacts to be built and uploaded to release if non-existing
-        required: false
-        type: boolean
-      force-ota-server-upload:
-        description: Force OTA server upload
-        required: false
-        type: boolean
       skip-release:
         description: Skip release (build only)
         required: false
         type: boolean
-      ota-version:
-        description: OTA version
-        required: false
-      magisk-version:
-        description: Magisk version
-        required: false
+        default: true
 
 jobs:
   build-device:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-  steps:
-      # FIX: Changed v6 to v4 (current stable version)
-      - uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
-      - name: Set inputs
-        run: |
-          DEVICE_ID=$(echo '${{ github.event.inputs.device-id || inputs.device-id || 'shiba' }}' | xargs)
-          echo "DEVICE_ID=$DEVICE_ID" >> $GITHUB_ENV
-          
-          if [[ "${{ github.event.inputs.skip-rooted }}" != "true" ]]; then
-            INPUT_PREINIT=$(echo '${{ github.event.inputs.magisk-preinit-device || inputs.magisk-preinit-device }}' | xargs)
-            if [[ -n "$INPUT_PREINIT" ]]; then
-               echo "MAGISK_PREINIT_DEVICE=$INPUT_PREINIT" >> $GITHUB_ENV
-            elif [[ "$DEVICE_ID" == "mustang" ]]; then
-               echo "MAGISK_PREINIT_DEVICE=sdb10" >> $GITHUB_ENV
-            else
-               echo "MAGISK_PREINIT_DEVICE=sda10" >> $GITHUB_ENV
-            fi
-          fi
-            
-          echo "MAGISK_VERSION=$(echo '${{ github.event.inputs.magisk-version || '' }}' | xargs)" >> $GITHUB_ENV
-          echo "OTA_VERSION=$(echo '${{ github.event.inputs.ota-version || '' }}' | xargs)" >> $GITHUB_ENV
-          echo "FORCE_OTA_SERVER_UPLOAD=$(echo '${{ github.event.inputs.force-ota-server-upload || '' }}' | xargs)" >> $GITHUB_ENV
-          echo "FORCE_BUILD=$(echo '${{ github.event.inputs.force-build || '' }}' | xargs)" >> $GITHUB_ENV
-          echo "UPLOAD_TEST_OTA=$(echo '${{ github.event.inputs.upload-test-ota || '' }}' | xargs)" >> $GITHUB_ENV
-          echo "SKIP_ROOTLESS=$(echo '${{ github.event.inputs.skip-rootless || '' }}' | xargs)" >> $GITHUB_ENV
-          echo "SKIP_RELEASE=$(echo '${{ github.event.inputs.skip-release || '' }}' | xargs)" >> $GITHUB_ENV
-            
-          if [[ "${{ github.event_name }}" == "push" ]]  || [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "Running on push: Simple build without release for device $DEVICE_ID"
-            echo "FORCE_BUILD=true" >> $GITHUB_ENV
-            echo "SKIP_RELEASE=true" >> $GITHUB_ENV
-            echo "GITHUB_TOKEN=must-be-set-but-is-not-used" >> $GITHUB_ENV
-          else
-            echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
-          fi
 
-      - run: sudo apt-get install -y jq curl git
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      # FIX: Added this step back with a dummy email so git commits work
-      - name: Configure git
+      - name: Install dependencies
         run: |
-          git config --global user.email "bot@github.com"
-          git config --global user.name "PiX Bot"
+          pip install tomlkit pydantic
+          sudo apt-get update
+          sudo apt-get install -y jq curl git e2fsprogs pkg-config
 
-      - name: release
-        env:
-          GITHUB_REPO: ${{ github.repository }}
-          KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
-          CERT_OTA_BASE64: ${{ secrets.CERT_OTA_BASE64 }}
-          KEY_OTA_BASE64: ${{ secrets.KEY_OTA_BASE64 }}
-          PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
-          PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
+      - name: Set environment variables
         run: |
-          if [[ $SKIP_RELEASE == 'true' ]]; then
-            DEBUG=1 bash -c '. rooted-ota.sh && createRootedOta && createOtaServerData'
-          else
-            DEBUG=1 bash -c '. rooted-ota.sh && createAndReleaseRootedOta'
-          fi
+          echo "DEVICE_NAME=${{ github.event.inputs.device-id }}" >> $GITHUB_ENV
+          echo "MAGISK_PREINIT_DEVICE=${{ github.event.inputs.magisk-preinit-device }}" >> $GITHUB_ENV
+          echo "INTERACTIVE_MODE=false" >> $GITHUB_ENV
+          echo "GRAPHENEOS_UPDATE_CHANNEL=stable" >> $GITHUB_ENV
+          echo "SKIP_RELEASE=${{ github.event.inputs.skip-release }}" >> $GITHUB_ENV
 
       - name: Configure Git
         run: |
@@ -140,46 +60,33 @@ jobs:
         run: |
           mkdir -p .keys
 
-          # Decode keys directly from environment variables
-          # tr -d removes any whitespace/newlines
-          echo "$AVB_KEY" | tr -d '\n\r ' | base64 -d > .keys/avb.pem
-          echo "$OTA_KEY" | tr -d '\n\r ' | base64 -d > .keys/ota.pem
-          echo "$CERT_OTA" | tr -d '\n\r ' | base64 -d > .keys/ota.crt
+          # Remove any whitespace and decode
+          echo "$AVB_KEY" | tr -d '\n\r\t ' | base64 -d > .keys/avb.pem
+          echo "$OTA_KEY" | tr -d '\n\r\t ' | base64 -d > .keys/ota.pem
+          echo "$CERT_OTA" | tr -d '\n\r\t ' | base64 -d > .keys/ota.crt
 
           chmod 600 .keys/*.pem
           chmod 644 .keys/*.crt
 
-          echo "Keys setup complete:"
+          # Verify
+          echo "Keys created:"
           ls -la .keys/
-
-          # Verify keys are valid
-          if [[ -s .keys/avb.pem ]]; then
-            echo "✓ AVB key created successfully"
-          else
-            echo "✗ AVB key is empty!"
-            exit 1
-          fi
-
-          if [[ -s .keys/ota.pem ]]; then
-            echo "✓ OTA key created successfully"
-          else
-            echo "✗ OTA key is empty!"
-            exit 1
-          fi
-
-          if [[ -s .keys/ota.crt ]]; then
-            echo "✓ OTA cert created successfully"
-          else
-            echo "✗ OTA cert is empty!"
-            exit 1
-          fi
+          
+          for f in .keys/*; do
+            if [[ -s "$f" ]]; then
+              echo "✓ $f OK ($(wc -c < "$f") bytes)"
+            else
+              echo "✗ $f EMPTY!"
+              exit 1
+            fi
+          done
 
       - name: Create env.toml
         env:
           PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
           PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
         run: |
-          cat > env.toml << EOF
+          cat > env.toml << 'ENVEOF'
           [device]
           DEVICE_NAME = "${{ env.DEVICE_NAME }}"
           'GRAPHENEOS[UPDATE_CHANNEL]' = "stable"
@@ -187,9 +94,7 @@ jobs:
           [avbroot]
           ARCH = "x86_64"
           AVB_KEY = ".keys/avb.pem"
-          AVB_KEY_PASSPHRASE = "${PASSPHRASE_AVB}"
           OTA_KEY = ".keys/ota.pem"
-          OTA_KEY_PASSPHRASE = "${PASSPHRASE_OTA}"
           CERT_OTA = ".keys/ota.crt"
 
           [modules]
@@ -209,7 +114,11 @@ jobs:
 
           [magisk]
           PREINIT_DEVICE = "${{ env.MAGISK_PREINIT_DEVICE }}"
-          EOF
+          ENVEOF
+
+          # Add passphrases separately to avoid escaping issues
+          sed -i "s|AVB_KEY = \".keys/avb.pem\"|AVB_KEY = \".keys/avb.pem\"\nAVB_KEY_PASSPHRASE = \"${PASSPHRASE_AVB}\"|" env.toml
+          sed -i "s|OTA_KEY = \".keys/ota.pem\"|OTA_KEY = \".keys/ota.pem\"\nOTA_KEY_PASSPHRASE = \"${PASSPHRASE_OTA}\"|" env.toml
 
           echo "env.toml created:"
           cat env.toml
@@ -217,13 +126,16 @@ jobs:
       - name: Make scripts executable
         run: |
           chmod +x src/*.sh
-          if [ -f setup_hooks.sh ]; then chmod +x setup_hooks.sh; fi
+          [ -f setup_hooks.sh ] && chmod +x setup_hooks.sh || true
 
       - name: Build PixeneOS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
         run: |
+          # Fix fetcher.sh URL display bug
+          sed -i 's/^\s*\$URL\s*$/echo "URL: $URL"/' src/fetcher.sh 2>/dev/null || true
+
           if [[ "${{ env.SKIP_RELEASE }}" == "true" ]]; then
             echo "Building without release..."
             DEBUG=1 . src/main.sh
